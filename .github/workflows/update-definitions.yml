@@ -1,0 +1,30 @@
+name: Publish ClamAV definitions
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clamav-definition-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify the mirror contract
+        run: bash tests/publish-contract.sh
+      - name: Install the supported ClamAV clients
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends clamav clamav-freshclam
+      - name: Publish verified immutable definitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-definitions.sh
