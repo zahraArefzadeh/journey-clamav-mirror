@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Keep the public mirror bounded, credential-free, and dependent on ClamAV's
-# supported downloader and signature verifier rather than direct CDN requests.
+# supported downloader and official GitHub Pages deployment path.
 set -Eeuo pipefail
 
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,20 +15,28 @@ done
 bash -n "$publisher"
 grep --fixed-strings --line-regexp --quiet '    runs-on: ubuntu-24.04' "$workflow"
 grep --fixed-strings --line-regexp --quiet '    timeout-minutes: 10' "$workflow"
-grep --fixed-strings --line-regexp --quiet '  contents: write' "$workflow"
+grep --fixed-strings --line-regexp --quiet '      pages: write' "$workflow"
+grep --fixed-strings --line-regexp --quiet '      id-token: write' "$workflow"
+grep --fixed-strings --line-regexp --quiet '      contents: write' "$workflow"
 grep --fixed-strings --line-regexp --quiet '  workflow_dispatch:' "$workflow"
 grep --fixed-strings --line-regexp --quiet '    - cron: "17 */12 * * *"' "$workflow"
+grep --fixed-strings --quiet 'actions/upload-pages-artifact@' "$workflow"
+grep --fixed-strings --quiet 'actions/deploy-pages@' "$workflow"
 grep --fixed-strings --quiet 'freshclam' "$publisher"
 grep --fixed-strings --quiet 'sigtool' "$publisher"
-grep --fixed-strings --quiet -- '--draft' "$publisher"
-grep --fixed-strings --quiet 'sha256sum --check --strict' "$publisher"
-grep --fixed-strings --quiet 'retained_release_count=8' "$publisher"
+grep --fixed-strings --quiet 'PAGES_SITE_DIRECTORY' "$publisher"
+grep --fixed-strings --quiet '250000000' "$publisher"
 grep --fixed-strings --quiet 'No application source, production data, credentials' "$readme"
 
 if grep --quiet --extended-regexp \
   '(secrets\.|BEGIN (RSA|OPENSSH|EC|AGE) PRIVATE KEY|AGE-SECRET-KEY-|postgresql://|ssh-ed25519 )' \
   "$workflow" "$publisher" "$readme"; then
   printf 'The public mirror contains a forbidden private value or secret reference.\n' >&2
+  exit 1
+fi
+if grep --quiet --extended-regexp '(gh release|release-assets\.githubusercontent\.com|GH_TOKEN)' \
+  "$workflow" "$publisher"; then
+  printf 'The public mirror still depends on the unreachable GitHub Release path.\n' >&2
   exit 1
 fi
 

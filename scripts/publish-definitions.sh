@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 # Fetch ClamAV databases through FreshClam, verify their vendor signatures,
-# publish one immutable release, then atomically advance the public manifest.
+# and build one bounded GitHub Pages artifact for atomic publication.
 set -Eeuo pipefail
 umask 077
 
 readonly expected_repository="zahraArefzadeh/journey-clamav-mirror"
 readonly release_prefix="definitions-"
-readonly retained_release_count=8
 readonly runner_directory="${RUNNER_TEMP:-}"
 readonly repository="${GITHUB_REPOSITORY:-}"
+readonly pages_directory="${PAGES_SITE_DIRECTORY:-}"
 
 if [[ "$repository" != "$expected_repository" ]] ||
   [[ -z "$runner_directory" ]] || [[ ! -d "$runner_directory" ]] ||
+  [[ -z "$pages_directory" ]] || [[ "$pages_directory" != "$runner_directory/"* ]] ||
+  [[ -e "$pages_directory" ]] || [[ -L "$pages_directory" ]] ||
   [[ "$(git rev-parse --show-toplevel)" != "$PWD" ]] ||
   [[ -n "$(git status --porcelain)" ]]; then
-  printf 'The ClamAV publisher requires its clean, expected GitHub repository.\n' >&2
+  printf 'The ClamAV publisher requires its clean, expected GitHub repository and runner output path.\n' >&2
   exit 78
 fi
 
-for required_command in freshclam gh git install jq sha256sum sigtool stat sudo; do
+for required_command in freshclam git install sha256sum sigtool stat sudo; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'Required publisher command is unavailable: %s\n' "$required_command" >&2
     exit 69
@@ -28,7 +30,6 @@ unset required_command
 
 readonly work_directory="$(mktemp -d "$runner_directory/clamav-mirror.XXXXXXXX")"
 readonly database_directory="$work_directory/database"
-readonly existing_directory="$work_directory/existing"
 
 cleanup() {
   find "$work_directory" -depth -delete
@@ -38,7 +39,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-install -d -m 0700 "$database_directory" "$existing_directory"
+install -d -m 0700 "$database_directory"
 sudo systemctl stop clamav-freshclam.service >/dev/null 2>&1 || true
 sudo freshclam --stdout
 
@@ -104,87 +105,24 @@ manifest_line() {
   printf '%s\t%s\t%s\t%s\n' "$name" "$checksum" "$bytes" "$version"
 }
 
-readonly candidate_manifest="$work_directory/current.txt"
+readonly published_database_directory="$pages_directory/$release_tag"
+install -d -m 0755 "$pages_directory" "$published_database_directory"
+for asset in main.cvd daily.cvd bytecode.cvd SHA256SUMS; do
+  install -m 0644 "$database_directory/$asset" "$published_database_directory/$asset"
+done
 {
   printf 'clamav-mirror/v1\n'
   printf 'tag\t%s\n' "$release_tag"
   manifest_line main.cvd "$main_version"
   manifest_line daily.cvd "$daily_version"
   manifest_line bytecode.cvd "$bytecode_version"
-} >"$candidate_manifest"
+} >"$pages_directory/current.txt"
+chmod 0644 "$pages_directory/current.txt"
 
-verify_existing_release() {
-  gh release download "$release_tag" \
-    --dir "$existing_directory" \
-    --pattern main.cvd \
-    --pattern daily.cvd \
-    --pattern bytecode.cvd \
-    --pattern SHA256SUMS
-  (
-    cd "$existing_directory"
-    sha256sum --check --strict SHA256SUMS
-  )
-  for asset in main.cvd daily.cvd bytecode.cvd SHA256SUMS; do
-    cmp --silent "$database_directory/$asset" "$existing_directory/$asset" || {
-      printf 'An immutable ClamAV release asset differs: %s\n' "$asset" >&2
-      return 65
-    }
-  done
-}
-
-release_state="$(gh release view "$release_tag" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
-case "$release_state" in
-  false)
-    verify_existing_release
-    ;;
-  true)
-    gh release delete "$release_tag" --cleanup-tag --yes
-    ;;
-  "")
-    ;;
-  *)
-    printf 'The existing ClamAV release has an unexpected state.\n' >&2
-    exit 65
-    ;;
-esac
-
-if [[ "$release_state" != "false" ]]; then
-  gh release create "$release_tag" \
-    --draft \
-    --latest=false \
-    --title "ClamAV definitions ${daily_version}" \
-    --notes "Public ClamAV databases fetched with FreshClam and verified with sigtool."
-  gh release upload "$release_tag" \
-    "$database_directory/main.cvd" \
-    "$database_directory/daily.cvd" \
-    "$database_directory/bytecode.cvd" \
-    "$database_directory/SHA256SUMS"
-  gh release edit "$release_tag" --draft=false --latest=false
+if [[ "$(find "$pages_directory" -type f -printf '%s\n' | awk '{total += $1} END {print total + 0}')" -gt 250000000 ]] ||
+  find "$pages_directory" -type l -print -quit | grep --quiet .; then
+  printf 'The ClamAV Pages artifact is too large or contains a symbolic link.\n' >&2
+  exit 65
 fi
 
-install -m 0644 "$candidate_manifest" current.txt
-if ! git diff --quiet -- current.txt || [[ -n "$(git ls-files --others --exclude-standard -- current.txt)" ]]; then
-  git config user.name 'journey-clamav-mirror[bot]'
-  git config user.email 'journey-clamav-mirror[bot]@users.noreply.github.com'
-  git add -- current.txt
-  git commit -m "chore: advance verified ClamAV definitions"
-  git push origin HEAD:main
-fi
-
-mapfile -t obsolete_releases < <(
-  gh release list --limit 100 --json tagName,createdAt,isDraft \
-    --jq '.[] | select(.isDraft == false) | [.createdAt, .tagName] | @tsv' |
-    sort --reverse |
-    awk -v prefix="$release_prefix" -v keep="$retained_release_count" \
-      '$2 ~ ("^" prefix) {seen += 1; if (seen > keep) print $2}'
-)
-for obsolete_release in "${obsolete_releases[@]}"; do
-  if [[ ! "$obsolete_release" =~ ^definitions-m[0-9]+-d[0-9]+-b[0-9]+-[0-9a-f]{12}$ ]] ||
-    [[ "$obsolete_release" == "$release_tag" ]]; then
-    printf 'Refusing to remove an unexpected ClamAV release.\n' >&2
-    exit 65
-  fi
-  gh release delete "$obsolete_release" --cleanup-tag --yes
-done
-
-printf 'Published verified ClamAV databases: %s\n' "$release_tag"
+printf 'Built verified ClamAV Pages artifact: %s\n' "$release_tag"
