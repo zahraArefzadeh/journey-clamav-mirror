@@ -31,13 +31,29 @@ grep --fixed-strings --quiet 'No application source, production data, credential
 if grep --quiet --extended-regexp \
   '(secrets\.|BEGIN (RSA|OPENSSH|EC|AGE) PRIVATE KEY|AGE-SECRET-KEY-|postgresql://|ssh-ed25519 )' \
   "$workflow" "$publisher" "$readme"; then
-  printf 'The public mirror contains a forbidden private value or secret reference.\n' >&2
+  printf 'The public mirror contains a forbidden private value or secret reference.
+' >&2
   exit 1
 fi
-if grep --quiet --extended-regexp '(gh release|release-assets\.githubusercontent\.com|GH_TOKEN)' \
-  "$workflow" "$publisher"; then
-  printf 'The public mirror still depends on the unreachable GitHub Release path.\n' >&2
+# The release path is a second download root for hosts that cannot reach github.io. It must reuse
+# the verified Pages artifact, never rebuild or fetch databases, and use only the workflow token.
+readonly release_publisher="$repository_root/scripts/publish-release-assets.sh"
+[[ -f "$release_publisher" ]] && [[ ! -L "$release_publisher" ]] || exit 1
+bash -n "$release_publisher"
+grep --fixed-strings --quiet 'actions/download-artifact@' "$workflow"
+grep --fixed-strings --quiet 'scripts/publish-release-assets.sh' "$workflow"
+grep --fixed-strings --quiet 'sha256sum --check --strict' "$release_publisher"
+grep --fixed-strings --quiet -- '--cleanup-tag' "$release_publisher"
+if grep --quiet --extended-regexp '(freshclam|curl|wget)' "$release_publisher"; then
+  printf 'The release publisher must not fetch or rebuild databases.
+' >&2
+  exit 1
+fi
+if grep --quiet --extended-regexp 'GH_TOKEN|ghp_|github_pat_' "$workflow" "$release_publisher"; then
+  printf 'The public mirror must use only the workflow token.
+' >&2
   exit 1
 fi
 
-printf 'Public ClamAV mirror contract passed.\n'
+printf 'Public ClamAV mirror contract passed.
+'
